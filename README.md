@@ -2,6 +2,7 @@
 
 A customizable desktop clock with interval alerts designed specifically for those with ADHD or anyone who benefits from time awareness and regular reminders.
 (I personally use this)
+##### _Parts of this code were generated with AI assistance. While efforts have been made to ensure quality, please report any issues or unexpected behavior on the GitHub repository._
 
 ![ADHDClock Screenshot](screenshot.png)
 
