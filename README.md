@@ -46,24 +46,24 @@ For individuals with ADHD, time blindness (difficulty perceiving the passage of 
     ```
 2. Create a virtual environment (recommended):
 
-    ```python -m venv venv```
+    `python -m venv venv`
 
 3. Activate the virtual environment:
    - Windows: 
    
-    ```venv\Scripts\activate.bat```
+   `venv\Scripts\activate.bat`
      
    - macOS/Linux: 
    
-     ```source venv/bin/activate```
+   `source venv/bin/activate`
 
 4. Install dependencies:
 
-    ```pip install numpy simpleaudio```
+    `pip install numpy simpleaudio`
 
 5. Run the application:
 
-    ```python main.py```
+    `python main.py`
 
 ## Usage
 
