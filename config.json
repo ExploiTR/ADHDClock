@@ -1,22 +1,22 @@
 {
     "clock": {
         "size": [
-            400,
-            100
+            500,
+            80
         ],
-        "font": "Arial",
-        "text_size": 48,
-        "opacity": 1,
-        "color": "#FFFFFF",
+        "font": "Broadway",
+        "text_size": 72,
+        "opacity": 0.3,
+        "color": "#00ff00",
         "position": [
-            761,
-            3
+            70,
+            341
         ]
     },
     "alarm": {
         "enabled": true,
         "duration": 1,
-        "interval": 300
+        "interval": 1109
     },
     "sound": {
         "type": [
@@ -28,5 +28,5 @@
         "frequency_min": 400,
         "frequency_max": 800
     },
-    "dragToMove": false
+    "dragToMove": true
 }
