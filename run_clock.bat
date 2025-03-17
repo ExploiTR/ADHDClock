@@ -33,7 +33,7 @@ echo Running Clock Overlay Application...
 python main.py %*
 
 REM Deactivate virtual environment
-call venv\Scripts\deactivate.bat
+call .venv\Scripts\deactivate.bat
 
 echo Clock Overlay Application closed.
 exit /b 0
