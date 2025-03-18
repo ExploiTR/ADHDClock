@@ -9,7 +9,6 @@ import simpleaudio as sa
 import datetime
 from PySide6 import QtWidgets, QtGui, QtCore
 
-
 class ConfigManager:
     def __init__(self, config_file="config.json"):
         self.config_file = config_file
@@ -24,6 +23,14 @@ class ConfigManager:
                 "opacity": 0.8,
                 "color": "#FFFFFF",
                 "position": [100, 100]
+            },
+            "countdown": {  # Add new section for countdown clock
+                "size": [250, 100],
+                "font": "Arial",
+                "text_size": 12,
+                "opacity": 0.8,
+                "color": "#FF0000",  # Red color for countdown by default
+                "position": [100, 220]  # Position below the main clock
             },
             "alarm": {
                 "enabled": False,
@@ -53,7 +60,6 @@ class ConfigManager:
             self.config = config
         with open(self.config_file, 'w') as f:
             json.dump(self.config, f, indent=4)
-
 
 class SoundGenerator:
     def __init__(self, config_manager):
@@ -130,28 +136,46 @@ class SoundGenerator:
                 # Clear reference to play_obj
                 self.play_obj = None
 
-
 class AlarmManager:
-    def __init__(self, config_manager, sound_generator):
+    def __init__(self, config_manager, sound_generator, countdown=None):
         self.config_manager = config_manager
         self.sound_generator = sound_generator
         self.active = False
         self.timer = QtCore.QTimer()
         self.timer.timeout.connect(self.alarm_callback)
+        self.last_trigger_time = QtCore.QDateTime.currentMSecsSinceEpoch()
+        self.countdown = countdown  # Store reference to countdown window
+
+    # Add a method to set the countdown reference if it wasn't available at initialization
+    def set_countdown(self, countdown):
+        self.countdown = countdown
 
     def start_alarm(self):
         if self.active:
             return
 
         self.active = True
-        interval = self.config_manager.config["alarm"]["interval"] * 1000  # Convert to milliseconds
+        # Initialize last trigger time
+        self.last_trigger_time = QtCore.QDateTime.currentMSecsSinceEpoch()
+        interval = self.config_manager.config["alarm"]["interval"] * 1000
         self.timer.start(interval)
+
+        # Show countdown if available
+        if self.countdown:
+            self.countdown.show()
 
     def stop_alarm(self):
         self.active = False
         self.timer.stop()
 
+        # Hide countdown if available
+        if self.countdown:
+            self.countdown.hide()
+
     def alarm_callback(self):
+        # Update last trigger time
+        self.last_trigger_time = QtCore.QDateTime.currentMSecsSinceEpoch()
+
         # Play sound in a separate thread
         sound_thread = threading.Thread(target=self.sound_generator.play_sound)
         sound_thread.daemon = True
@@ -161,10 +185,130 @@ class AlarmManager:
         interval = self.config_manager.config["alarm"]["interval"] * 1000
         self.timer.setInterval(interval)
 
+class CountdownOverlay(QtWidgets.QMainWindow):
+    def __init__(self, config_manager, alarm_manager):
+        super().__init__(flags=QtCore.Qt.FramelessWindowHint | QtCore.Qt.WindowStaysOnTopHint | QtCore.Qt.Tool)
+
+        self.config_manager = config_manager
+        self.alarm_manager = alarm_manager
+
+        # Create transparent background
+        self.setAttribute(QtCore.Qt.WA_TranslucentBackground)
+
+        # Create central widget
+        central_widget = QtWidgets.QWidget()
+        self.setCentralWidget(central_widget)
+
+        # Create layout
+        layout = QtWidgets.QVBoxLayout(central_widget)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        # Create countdown label
+        self.countdown_label = QtWidgets.QLabel()
+        self.countdown_label.setAlignment(QtCore.Qt.AlignCenter)
+
+        # Set up font from config
+        self.apply_config()
+
+        # Add label to layout
+        layout.addWidget(self.countdown_label)
+
+        # Update countdown immediately and start timer
+        self.update_countdown()
+        self.timer = QtCore.QTimer(self)
+        self.timer.timeout.connect(self.update_countdown)
+        self.timer.start(100)  # Update more frequently for milliseconds
+
+        # Setup drag functionality
+        self.drag_enabled = self.config_manager.config.get("dragToMove", True)
+        self.dragging = False
+
+        # Right-click context menu
+        self.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
+        self.customContextMenuRequested.connect(self.show_context_menu)
+
+        # Initially hide if alarm is disabled
+        self.setVisible(self.config_manager.config["alarm"]["enabled"])
+
+    def apply_config(self):
+        countdown_config = self.config_manager.config["countdown"]
+
+        # Set size and position
+        self.resize(countdown_config["size"][0], countdown_config["size"][1])
+        self.move(countdown_config["position"][0], countdown_config["position"][1])
+
+        # Set opacity
+        self.setWindowOpacity(countdown_config["opacity"])
+
+        # Configure font and color
+        font_family = countdown_config["font"]
+        font_size = countdown_config["text_size"]
+        color = countdown_config["color"]
+
+        # Create font with anti-aliasing
+        font = QtGui.QFont(font_family, font_size)
+        font.setStyleStrategy(QtGui.QFont.PreferAntialias)
+        self.countdown_label.setFont(font)
+
+        # Set text color
+        self.countdown_label.setStyleSheet(f"color: {color}; background-color: transparent;")
+
+    def update_countdown(self):
+        if not self.alarm_manager.active:
+            self.hide()
+            return
+        else:
+            self.show()
+
+        # Calculate time until next alarm
+        interval_ms = self.config_manager.config["alarm"]["interval"] * 1000
+        current_time = QtCore.QDateTime.currentMSecsSinceEpoch()
+        elapsed_ms = (current_time - self.alarm_manager.last_trigger_time) % interval_ms
+        remaining_ms = interval_ms - elapsed_ms
+
+        # Convert to hours, minutes, seconds, milliseconds
+        hours = remaining_ms // 3600000
+        minutes = (remaining_ms % 3600000) // 60000
+        seconds = (remaining_ms % 60000) // 1000
+        millis = remaining_ms % 1000
+
+        # Format the display
+        countdown_text = f"{hours:02d}:{minutes:02d}:{seconds:02d}.{millis // 10:02d}"
+        self.countdown_label.setText(countdown_text)
+
+    def mousePressEvent(self, event):
+        if event.button() == QtCore.Qt.LeftButton and self.drag_enabled:
+            self.dragging = True
+            self.drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+            event.accept()
+
+    def mouseMoveEvent(self, event):
+        if self.dragging and event.buttons() & QtCore.Qt.LeftButton and self.drag_enabled:
+            self.move(event.globalPosition().toPoint() - self.drag_pos)
+            # Update position in config
+            self.config_manager.config["countdown"]["position"] = [self.x(), self.y()]
+            self.config_manager.save_config()
+            event.accept()
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == QtCore.Qt.LeftButton:
+            self.dragging = False
+
+    def show_context_menu(self, point):
+        context_menu = QtWidgets.QMenu(self)
+        settings_action = context_menu.addAction("Settings")
+        quit_action = context_menu.addAction("Quit")
+
+        action = context_menu.exec(self.mapToGlobal(point))
+        if action == settings_action:
+            settings_window = SettingsWindow(self, self.config_manager, self.alarm_manager)
+            settings_window.exec()
+        elif action == quit_action:
+            QtWidgets.QApplication.instance().quit()
 
 class ClockOverlay(QtWidgets.QMainWindow):
     def __init__(self, config_manager, alarm_manager):
-        super().__init__(flags=QtCore.Qt.FramelessWindowHint | QtCore.Qt.WindowStaysOnTopHint)
+        super().__init__(flags=QtCore.Qt.FramelessWindowHint | QtCore.Qt.WindowStaysOnTopHint | QtCore.Qt.Tool)
 
         self.config_manager = config_manager
         self.alarm_manager = alarm_manager
@@ -259,8 +403,7 @@ class ClockOverlay(QtWidgets.QMainWindow):
             settings_window = SettingsWindow(self, self.config_manager, self.alarm_manager)
             settings_window.exec()
         elif action == quit_action:
-            self.close()
-
+            QtWidgets.QApplication.instance().quit()
 
 class FontComboBox(QtWidgets.QComboBox):
     """Custom combobox specifically for font selection with search capabilities"""
@@ -339,7 +482,6 @@ class FontComboBox(QtWidgets.QComboBox):
         except:
             return False
 
-
 class FontItemDelegate(QtWidgets.QStyledItemDelegate):
     """Custom delegate to render font names in their own font"""
 
@@ -368,7 +510,6 @@ class FontItemDelegate(QtWidgets.QStyledItemDelegate):
             # Fall back to default rendering if no font is set
             super().paint(painter, option, index)
 
-
 class SettingsWindow(QtWidgets.QDialog):
     def __init__(self, parent, config_manager, alarm_manager):
         super().__init__(parent)
@@ -388,11 +529,13 @@ class SettingsWindow(QtWidgets.QDialog):
         appearance_tab = self.create_appearance_tab()
         alarm_tab = self.create_alarm_tab()
         sound_tab = self.create_sound_tab()
+        countdown_tab = self.create_countdown_tab()  # Add new tab
 
         # Add tabs to widget
         tab_widget.addTab(appearance_tab, "Appearance")
         tab_widget.addTab(alarm_tab, "Alarm")
         tab_widget.addTab(sound_tab, "Sound")
+        tab_widget.addTab(countdown_tab, "Countdown")  # Add new tab
 
         # Create buttons
         button_box = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Save | QtWidgets.QDialogButtonBox.Cancel)
@@ -716,6 +859,166 @@ class SettingsWindow(QtWidgets.QDialog):
         tab.setLayout(layout)
         return tab
 
+    def create_countdown_tab(self):
+        tab = QtWidgets.QWidget()
+        layout = QtWidgets.QFormLayout()
+
+        # Width
+        self.countdown_width_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.countdown_width_slider.setRange(150, 500)
+        self.countdown_width_slider.setValue(self.config_manager.config["countdown"]["size"][0])
+
+        self.countdown_width_spinbox = QtWidgets.QSpinBox()
+        self.countdown_width_spinbox.setRange(150, 500)
+        self.countdown_width_spinbox.setValue(self.countdown_width_slider.value())
+        self.countdown_width_spinbox.setSuffix(" px")
+
+        # Connect for two-way synchronization
+        self.countdown_width_slider.valueChanged.connect(self.countdown_width_spinbox.setValue)
+        self.countdown_width_spinbox.valueChanged.connect(self.countdown_width_slider.setValue)
+
+        width_layout = QtWidgets.QHBoxLayout()
+        width_layout.addWidget(self.countdown_width_slider)
+        width_layout.addWidget(self.countdown_width_spinbox)
+        layout.addRow("Width:", width_layout)
+
+        # Height
+        self.countdown_height_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.countdown_height_slider.setRange(80, 200)
+        self.countdown_height_slider.setValue(self.config_manager.config["countdown"]["size"][1])
+
+        self.countdown_height_spinbox = QtWidgets.QSpinBox()
+        self.countdown_height_spinbox.setRange(80, 200)
+        self.countdown_height_spinbox.setValue(self.countdown_height_slider.value())
+        self.countdown_height_spinbox.setSuffix(" px")
+
+        # Connect for two-way synchronization
+        self.countdown_height_slider.valueChanged.connect(self.countdown_height_spinbox.setValue)
+        self.countdown_height_spinbox.valueChanged.connect(self.countdown_height_slider.setValue)
+
+        height_layout = QtWidgets.QHBoxLayout()
+        height_layout.addWidget(self.countdown_height_slider)
+        height_layout.addWidget(self.countdown_height_spinbox)
+        layout.addRow("Height:", height_layout)
+
+        # Font (use the same font combo system as the main clock)
+        self.countdown_font_combo = FontComboBox()
+        layout.addRow("Font:", self.countdown_font_combo)
+
+        # Populate font combo after fonts are loaded in main tab
+        QtCore.QTimer.singleShot(1000, self.populate_countdown_fonts)
+
+        # Text Size
+        self.countdown_text_size_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.countdown_text_size_slider.setRange(10, 72)
+        self.countdown_text_size_slider.setValue(self.config_manager.config["countdown"]["text_size"])
+
+        self.countdown_text_size_spinbox = QtWidgets.QSpinBox()
+        self.countdown_text_size_spinbox.setRange(10, 72)
+        self.countdown_text_size_spinbox.setValue(self.countdown_text_size_slider.value())
+        self.countdown_text_size_spinbox.setSuffix(" pt")
+
+        # Connect for two-way synchronization
+        self.countdown_text_size_slider.valueChanged.connect(self.countdown_text_size_spinbox.setValue)
+        self.countdown_text_size_spinbox.valueChanged.connect(self.countdown_text_size_slider.setValue)
+
+        text_size_layout = QtWidgets.QHBoxLayout()
+        text_size_layout.addWidget(self.countdown_text_size_slider)
+        text_size_layout.addWidget(self.countdown_text_size_spinbox)
+        layout.addRow("Text Size:", text_size_layout)
+
+        # Opacity
+        self.countdown_opacity_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.countdown_opacity_slider.setRange(1, 10)
+        self.countdown_opacity_slider.setValue(int(self.config_manager.config["countdown"]["opacity"] * 10))
+
+        self.countdown_opacity_spinbox = QtWidgets.QDoubleSpinBox()
+        self.countdown_opacity_spinbox.setRange(0.1, 1.0)
+        self.countdown_opacity_spinbox.setSingleStep(0.1)
+        self.countdown_opacity_spinbox.setDecimals(1)
+        self.countdown_opacity_spinbox.setValue(self.countdown_opacity_slider.value() / 10)
+
+        # Connect with conversion between slider int value and spinbox decimal
+        self.countdown_opacity_slider.valueChanged.connect(lambda v: self.countdown_opacity_spinbox.setValue(v / 10))
+        self.countdown_opacity_spinbox.valueChanged.connect(
+            lambda v: self.countdown_opacity_slider.setValue(int(v * 10)))
+
+        opacity_layout = QtWidgets.QHBoxLayout()
+        opacity_layout.addWidget(self.countdown_opacity_slider)
+        opacity_layout.addWidget(self.countdown_opacity_spinbox)
+        layout.addRow("Opacity:", opacity_layout)
+
+        # Text Color
+        self.countdown_color_button = QtWidgets.QPushButton()
+        current_color = self.config_manager.config["countdown"]["color"]
+        self.countdown_color_button.setStyleSheet(
+            f"background-color: {current_color}; min-width: 60px; min-height: 30px;")
+        self.countdown_color_button.clicked.connect(self.choose_countdown_color)
+        layout.addRow("Text Color:", self.countdown_color_button)
+
+        # Font preview
+        self.countdown_preview_frame = QtWidgets.QFrame()
+        self.countdown_preview_frame.setFrameShape(QtWidgets.QFrame.StyledPanel)
+        self.countdown_preview_frame.setMinimumHeight(60)
+        self.countdown_preview_layout = QtWidgets.QVBoxLayout(self.countdown_preview_frame)
+
+        self.countdown_preview_label = QtWidgets.QLabel("00:00:30.00")
+        self.countdown_preview_label.setAlignment(QtCore.Qt.AlignCenter)
+        self.countdown_preview_layout.addWidget(self.countdown_preview_label)
+
+        layout.addRow("Preview:", self.countdown_preview_frame)
+
+        # Connect signals for live preview
+        self.countdown_font_combo.currentTextChanged.connect(self.update_countdown_preview)
+        self.countdown_text_size_slider.valueChanged.connect(self.update_countdown_preview)
+        self.countdown_color_button.clicked.connect(self.update_countdown_preview)
+
+        # Initial preview update
+        QtCore.QTimer.singleShot(500, self.update_countdown_preview)
+
+        tab.setLayout(layout)
+        return tab
+
+    def populate_countdown_fonts(self):
+        """Populate countdown font combo with the same fonts"""
+        try:
+            # Populate with the same fonts as the main combo
+            self.countdown_font_combo.populate_fonts()
+            # Set current font
+            current_font = self.config_manager.config["countdown"]["font"]
+            self.countdown_font_combo.setCurrentText(current_font)
+        except Exception as e:
+            print(f"Error populating countdown fonts: {e}")
+
+    def choose_countdown_color(self):
+        current_color = self.config_manager.config["countdown"]["color"]
+        color = QtWidgets.QColorDialog.getColor(QtGui.QColor(current_color), self, "Choose Countdown Text Color")
+        if color.isValid():
+            self.countdown_color_button.setStyleSheet(
+                f"background-color: {color.name()}; min-width: 60px; min-height: 30px;")
+            self.update_countdown_preview()
+
+    def update_countdown_preview(self):
+        """Update the countdown font preview based on current settings"""
+        try:
+            # Get current settings
+            font_name = self.countdown_font_combo.currentText()
+            font_size = self.countdown_text_size_slider.value()
+
+            # Get color from button
+            color_style = self.countdown_color_button.styleSheet()
+            color = color_style.split("background-color:")[1].split(";")[0].strip()
+
+            # Create font
+            font = QtGui.QFont(font_name, font_size)
+            font.setStyleStrategy(QtGui.QFont.PreferAntialias)
+
+            # Update preview
+            self.countdown_preview_label.setFont(font)
+            self.countdown_preview_label.setStyleSheet(f"color: {color};")
+        except Exception as e:
+            print(f"Error updating countdown preview: {e}")
+
     def choose_color(self):
         current_color = self.config_manager.config["clock"]["color"]
         color = QtWidgets.QColorDialog.getColor(QtGui.QColor(current_color), self, "Choose Text Color")
@@ -770,6 +1073,20 @@ class SettingsWindow(QtWidgets.QDialog):
         self.config_manager.config["clock"]["color"] = color
         self.config_manager.config["dragToMove"] = self.drag_checkbox.isChecked()
 
+        # Save countdown settings
+        self.config_manager.config["countdown"]["size"] = [
+            self.countdown_width_spinbox.value(),
+            self.countdown_height_spinbox.value()
+        ]
+        self.config_manager.config["countdown"]["font"] = self.countdown_font_combo.currentText()
+        self.config_manager.config["countdown"]["text_size"] = self.countdown_text_size_spinbox.value()
+        self.config_manager.config["countdown"]["opacity"] = self.countdown_opacity_spinbox.value()
+
+        # Get color from button
+        countdown_color_style = self.countdown_color_button.styleSheet()
+        countdown_color = countdown_color_style.split("background-color:")[1].split(";")[0].strip()
+        self.config_manager.config["countdown"]["color"] = countdown_color
+
         # Alarm settings
         old_alarm_enabled = self.config_manager.config["alarm"]["enabled"]
         self.config_manager.config["alarm"]["enabled"] = self.alarm_checkbox.isChecked()
@@ -802,7 +1119,12 @@ class SettingsWindow(QtWidgets.QDialog):
         self.parent.apply_config()
         self.parent.drag_enabled = self.drag_checkbox.isChecked()
 
-        # Handle alarm state
+        # Apply changes to countdown clock if parent is countdown
+        if hasattr(self.parent, 'countdown_label'):
+            self.parent.apply_config()
+            self.parent.drag_enabled = self.drag_checkbox.isChecked()
+
+        # Handle alarm state - this will take care of showing/hiding the countdown
         if self.alarm_checkbox.isChecked() and not old_alarm_enabled:
             self.alarm_manager.start_alarm()
         elif not self.alarm_checkbox.isChecked() and old_alarm_enabled:
@@ -810,6 +1132,88 @@ class SettingsWindow(QtWidgets.QDialog):
 
         self.accept()
 
+class SystemTrayIcon(QtWidgets.QSystemTrayIcon):
+    def __init__(self, app, clock, countdown, alarm_manager, config_manager):
+        # Load custom PNG icon
+        icon_path = "logo.png"  # Path to your icon file
+
+        # Check if file exists and use it, otherwise fall back to system icon
+        if os.path.exists(icon_path):
+            icon = QtGui.QIcon(icon_path)
+        else:
+            # Fallback to system icon
+            icon = app.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_DesktopIcon)
+
+        super().__init__(icon, app)  # Pass parent application
+
+        self.app = app
+        self.clock = clock
+        self.countdown = countdown
+        self.alarm_manager = alarm_manager
+        self.config_manager = config_manager
+
+        # Create icon (you might want to use a proper icon file)
+        self.setIcon(icon)
+
+        # Create menu
+        self.menu = QtWidgets.QMenu()
+
+        # Add actions
+        self.show_clock_action = self.menu.addAction("Show/Hide Clock")
+        self.show_clock_action.triggered.connect(self.toggle_clock)
+
+        self.alarm_action = self.menu.addAction("Enable Alarm")
+        self.alarm_action.setCheckable(True)
+        self.alarm_action.setChecked(self.alarm_manager.active)
+        self.alarm_action.triggered.connect(self.toggle_alarm)
+
+        self.menu.addSeparator()
+
+        self.settings_action = self.menu.addAction("Settings")
+        self.settings_action.triggered.connect(self.show_settings)
+
+        self.menu.addSeparator()
+
+        self.quit_action = self.menu.addAction("Quit")
+        self.quit_action.triggered.connect(self.quit_app)
+
+        # Set context menu
+        self.setContextMenu(self.menu)
+
+        # Show the tray icon
+        self.show()
+
+        # Connect activated signal (when user clicks the tray icon)
+        self.activated.connect(self.on_activated)
+
+    def toggle_clock(self):
+        if self.clock.isVisible():
+            self.clock.hide()
+        else:
+            self.clock.show()
+
+    def toggle_alarm(self, checked):
+        if checked:
+            self.alarm_manager.start_alarm()
+            self.config_manager.config["alarm"]["enabled"] = True
+        else:
+            self.alarm_manager.stop_alarm()
+            self.config_manager.config["alarm"]["enabled"] = False
+        self.config_manager.save_config()
+
+    def show_settings(self):
+        settings_window = SettingsWindow(self.clock, self.config_manager, self.alarm_manager)
+        settings_window.exec()
+        # Update alarm action state after settings might have changed
+        self.alarm_action.setChecked(self.alarm_manager.active)
+
+    def quit_app(self):
+        self.app.quit()
+
+    def on_activated(self, reason):
+        # If double-clicked or clicked, show/hide the clock
+        if reason == QtWidgets.QSystemTrayIcon.DoubleClick or reason == QtWidgets.QSystemTrayIcon.Trigger:
+            self.toggle_clock()
 
 def main():
     # For Qt 6 (PySide6), high DPI scaling is enabled by default
@@ -818,6 +1222,9 @@ def main():
     # os.environ["QT_SCALE_FACTOR"] = "1"  # Can be used to force a specific scale factor
 
     app = QtWidgets.QApplication(sys.argv)
+
+    # Important: Set this to keep app running when all windows are closed
+    app.setQuitOnLastWindowClosed(False)
 
     # Modern way to handle screen scaling in Qt 6
     # Default is already set to PerMonitorV2 in Qt 6
@@ -829,15 +1236,26 @@ def main():
     sound_generator = SoundGenerator(config_manager)
     alarm_manager = AlarmManager(config_manager, sound_generator)
 
-    # Start alarm if enabled in config
+    clock = ClockOverlay(config_manager, alarm_manager)
+    countdown = CountdownOverlay(config_manager, alarm_manager)
+
+    # Set Tool flag to hide from taskbar
+    clock.setWindowFlags(clock.windowFlags() | QtCore.Qt.Tool)
+    countdown.setWindowFlags(countdown.windowFlags() | QtCore.Qt.Tool)
+
+    # Now set the countdown in the alarm_manager
+    alarm_manager.set_countdown(countdown)
+
+    # Start alarm if enabled in config (which will also show countdown if needed)
     if config_manager.config["alarm"]["enabled"]:
         alarm_manager.start_alarm()
 
-    clock = ClockOverlay(config_manager, alarm_manager)
+    # Create system tray icon
+    tray_icon = SystemTrayIcon(app, clock, countdown, alarm_manager, config_manager)
+
     clock.show()
 
     sys.exit(app.exec())
-
 
 if __name__ == "__main__":
     main()

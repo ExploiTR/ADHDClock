@@ -1,22 +1,36 @@
 {
     "clock": {
         "size": [
-            500,
-            80
+            250,
+            100
         ],
-        "font": "Broadway",
-        "text_size": 72,
-        "opacity": 1.0,
-        "color": "#ff0000",
+        "font": "Bahnschrift",
+        "text_size": 36,
+        "opacity": 0.8,
+        "color": "#ff0004",
         "position": [
-            293,
-            55
+            799,
+            16
+        ]
+    },
+    "countdown": {
+        "size": [
+            250,
+            100
+        ],
+        "font": "Cascadia Code",
+        "text_size": 12,
+        "opacity": 1.0,
+        "color": "#f2ff00",
+        "position": [
+            987,
+            14
         ]
     },
     "alarm": {
         "enabled": true,
         "duration": 1,
-        "interval": 1109
+        "interval": 300
     },
     "sound": {
         "type": [
@@ -25,8 +39,8 @@
             "sawtooth",
             "triangle"
         ],
-        "frequency_min": 400,
-        "frequency_max": 800
+        "frequency_min": 800,
+        "frequency_max": 1200
     },
-    "dragToMove": true
+    "dragToMove": false
 }
