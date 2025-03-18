@@ -61,7 +61,7 @@ For individuals with ADHD, time blindness (difficulty perceiving the passage of 
 
 4. Install dependencies:
 
-    `pip install numpy simpleaudio`
+    `pip install numpy simpleaudio PySide6`
 
 5. Run the application:
 
