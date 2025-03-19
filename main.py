@@ -301,7 +301,14 @@ class CountdownOverlay(QtWidgets.QMainWindow):
 
         action = context_menu.exec(self.mapToGlobal(point))
         if action == settings_action:
-            settings_window = SettingsWindow(self, self.config_manager, self.alarm_manager)
+            # Find clock window
+            clock = None
+            for widget in QtWidgets.QApplication.allWidgets():
+                if isinstance(widget, ClockOverlay):
+                    clock = widget
+                    break
+            settings_window = SettingsWindow(self, self.config_manager, self.alarm_manager,
+                                             clock=clock, countdown=self)
             settings_window.exec()
         elif action == quit_action:
             QtWidgets.QApplication.instance().quit()
@@ -400,7 +407,14 @@ class ClockOverlay(QtWidgets.QMainWindow):
 
         action = context_menu.exec(self.mapToGlobal(point))
         if action == settings_action:
-            settings_window = SettingsWindow(self, self.config_manager, self.alarm_manager)
+            # Find countdown window
+            countdown = None
+            for widget in QtWidgets.QApplication.allWidgets():
+                if isinstance(widget, CountdownOverlay):
+                    countdown = widget
+                    break
+            settings_window = SettingsWindow(self, self.config_manager, self.alarm_manager,
+                                             clock=self, countdown=countdown)
             settings_window.exec()
         elif action == quit_action:
             QtWidgets.QApplication.instance().quit()
@@ -511,11 +525,19 @@ class FontItemDelegate(QtWidgets.QStyledItemDelegate):
             super().paint(painter, option, index)
 
 class SettingsWindow(QtWidgets.QDialog):
-    def __init__(self, parent, config_manager, alarm_manager):
+    def __init__(self, parent, config_manager, alarm_manager, clock=None, countdown=None):
         super().__init__(parent)
         self.parent = parent
         self.config_manager = config_manager
         self.alarm_manager = alarm_manager
+        self.clock = clock
+        self.countdown = countdown
+
+        # If clock or countdown isn't provided, try to infer them from parent
+        if self.clock is None and isinstance(parent, ClockOverlay):
+            self.clock = parent
+        if self.countdown is None and isinstance(parent, CountdownOverlay):
+            self.countdown = parent
 
         # Set window properties
         self.setWindowTitle("Clock Settings")
@@ -532,10 +554,10 @@ class SettingsWindow(QtWidgets.QDialog):
         countdown_tab = self.create_countdown_tab()  # Add new tab
 
         # Add tabs to widget
-        tab_widget.addTab(appearance_tab, "Appearance")
+        tab_widget.addTab(appearance_tab, "Main Clock")
+        tab_widget.addTab(countdown_tab, "Countdown")  # Add new tab
         tab_widget.addTab(alarm_tab, "Alarm")
         tab_widget.addTab(sound_tab, "Sound")
-        tab_widget.addTab(countdown_tab, "Countdown")  # Add new tab
 
         # Create buttons
         button_box = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Save | QtWidgets.QDialogButtonBox.Cancel)
@@ -704,9 +726,8 @@ class SettingsWindow(QtWidgets.QDialog):
                                             QtCore.Qt.QueuedConnection,
                                             QtCore.Q_ARG(str, f"Found {len(compatible_fonts)} compatible fonts"))
 
-            # Update preview when fonts are loaded
-            QtCore.QMetaObject.invokeMethod(self, "update_preview",
-                                            QtCore.Qt.QueuedConnection)
+            # Update preview when fonts are loaded - use QTimer instead
+            QtCore.QTimer.singleShot(0, self.update_preview)
 
         except Exception as e:
             print(f"Error loading fonts: {e}")
@@ -745,43 +766,78 @@ class SettingsWindow(QtWidgets.QDialog):
         self.alarm_checkbox.setChecked(self.config_manager.config["alarm"]["enabled"])
         layout.addRow("Enable Alarm:", self.alarm_checkbox)
 
-        # Duration
+        # Duration (with decimal control as requested earlier)
         self.duration_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
-        self.duration_slider.setRange(1, 10)
-        self.duration_slider.setValue(self.config_manager.config["alarm"]["duration"])
+        self.duration_slider.setRange(1, 100)  # Range from 0.1 to 10.0 seconds
+        current_duration = self.config_manager.config["alarm"]["duration"]
+        self.duration_slider.setValue(int(current_duration * 10))  # Convert to slider value
 
-        self.duration_spinbox = QtWidgets.QSpinBox()
-        self.duration_spinbox.setRange(1, 10)
-        self.duration_spinbox.setValue(self.duration_slider.value())
+        self.duration_spinbox = QtWidgets.QDoubleSpinBox()
+        self.duration_spinbox.setRange(0.1, 10.0)
+        self.duration_spinbox.setSingleStep(0.1)
+        self.duration_spinbox.setDecimals(1)
+        self.duration_spinbox.setValue(current_duration)
         self.duration_spinbox.setSuffix(" sec")
 
         # Connect for two-way synchronization
-        self.duration_slider.valueChanged.connect(self.duration_spinbox.setValue)
-        self.duration_spinbox.valueChanged.connect(self.duration_slider.setValue)
+        self.duration_slider.valueChanged.connect(lambda v: self.duration_spinbox.setValue(v / 10.0))
+        self.duration_spinbox.valueChanged.connect(lambda v: self.duration_slider.setValue(int(v * 10)))
 
         duration_layout = QtWidgets.QHBoxLayout()
         duration_layout.addWidget(self.duration_slider)
         duration_layout.addWidget(self.duration_spinbox)
         layout.addRow("Duration:", duration_layout)
 
-        # Interval
-        self.interval_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
-        self.interval_slider.setRange(5, 3600)
-        self.interval_slider.setValue(self.config_manager.config["alarm"]["interval"])
-
-        self.interval_spinbox = QtWidgets.QSpinBox()
-        self.interval_spinbox.setRange(5, 3600)
-        self.interval_spinbox.setValue(self.interval_slider.value())
-        self.interval_spinbox.setSuffix(" sec")
-
-        # Connect for two-way synchronization
-        self.interval_slider.valueChanged.connect(self.interval_spinbox.setValue)
-        self.interval_spinbox.valueChanged.connect(self.interval_slider.setValue)
-
+        # Interval - NEW HH:MM:SS CONTROLS
         interval_layout = QtWidgets.QHBoxLayout()
-        interval_layout.addWidget(self.interval_slider)
-        interval_layout.addWidget(self.interval_spinbox)
+
+        # Convert total seconds to hours, minutes, seconds
+        total_seconds = self.config_manager.config["alarm"]["interval"]
+        hours = total_seconds // 3600
+        minutes = (total_seconds % 3600) // 60
+        seconds = total_seconds % 60
+
+        # Hours
+        self.hours_spinbox = QtWidgets.QSpinBox()
+        self.hours_spinbox.setRange(0, 23)
+        self.hours_spinbox.setValue(hours)
+        self.hours_spinbox.setSuffix(" h")
+        self.hours_spinbox.setFixedWidth(70)
+
+        # Minutes
+        self.minutes_spinbox = QtWidgets.QSpinBox()
+        self.minutes_spinbox.setRange(0, 59)
+        self.minutes_spinbox.setValue(minutes)
+        self.minutes_spinbox.setSuffix(" m")
+        self.minutes_spinbox.setFixedWidth(70)
+
+        # Seconds
+        self.seconds_spinbox = QtWidgets.QSpinBox()
+        self.seconds_spinbox.setRange(0, 59)
+        self.seconds_spinbox.setValue(seconds)
+        self.seconds_spinbox.setSuffix(" s")
+        self.seconds_spinbox.setFixedWidth(70)
+
+        # Add labels and spinboxes to layout
+        interval_layout.addWidget(self.hours_spinbox)
+        interval_layout.addWidget(QtWidgets.QLabel(":"))
+        interval_layout.addWidget(self.minutes_spinbox)
+        interval_layout.addWidget(QtWidgets.QLabel(":"))
+        interval_layout.addWidget(self.seconds_spinbox)
+        interval_layout.addStretch()
+
         layout.addRow("Interval:", interval_layout)
+
+        # Prevent setting all values to zero
+        def check_all_zeros():
+            if (self.hours_spinbox.value() == 0 and
+                    self.minutes_spinbox.value() == 0 and
+                    self.seconds_spinbox.value() == 0):
+                self.seconds_spinbox.setValue(5)  # Minimum 5 seconds
+
+        self.hours_spinbox.valueChanged.connect(check_all_zeros)
+        self.minutes_spinbox.valueChanged.connect(check_all_zeros)
+        self.seconds_spinbox.valueChanged.connect(check_all_zeros)
 
         tab.setLayout(layout)
         return tab
@@ -792,7 +848,7 @@ class SettingsWindow(QtWidgets.QDialog):
 
         # Wave Types
         wave_types_group = QtWidgets.QGroupBox("Wave Types")
-        wave_types_layout = QtWidgets.QHBoxLayout()
+        wave_types_layout = QtWidgets.QGridLayout()  # Changed to grid layout
 
         self.sine_checkbox = QtWidgets.QCheckBox("Sine")
         self.square_checkbox = QtWidgets.QCheckBox("Square")
@@ -805,10 +861,25 @@ class SettingsWindow(QtWidgets.QDialog):
         self.sawtooth_checkbox.setChecked("sawtooth" in current_types)
         self.triangle_checkbox.setChecked("triangle" in current_types)
 
-        wave_types_layout.addWidget(self.sine_checkbox)
-        wave_types_layout.addWidget(self.square_checkbox)
-        wave_types_layout.addWidget(self.sawtooth_checkbox)
-        wave_types_layout.addWidget(self.triangle_checkbox)
+        # Create test buttons for each wave type
+        sine_test_button = QtWidgets.QPushButton("Test")
+        sine_test_button.clicked.connect(lambda: self.test_sound("sine"))
+        square_test_button = QtWidgets.QPushButton("Test")
+        square_test_button.clicked.connect(lambda: self.test_sound("square"))
+        sawtooth_test_button = QtWidgets.QPushButton("Test")
+        sawtooth_test_button.clicked.connect(lambda: self.test_sound("sawtooth"))
+        triangle_test_button = QtWidgets.QPushButton("Test")
+        triangle_test_button.clicked.connect(lambda: self.test_sound("triangle"))
+
+        # Add to layout in a grid format
+        wave_types_layout.addWidget(self.sine_checkbox, 0, 0)
+        wave_types_layout.addWidget(sine_test_button, 0, 1)
+        wave_types_layout.addWidget(self.square_checkbox, 1, 0)
+        wave_types_layout.addWidget(square_test_button, 1, 1)
+        wave_types_layout.addWidget(self.sawtooth_checkbox, 2, 0)
+        wave_types_layout.addWidget(sawtooth_test_button, 2, 1)
+        wave_types_layout.addWidget(self.triangle_checkbox, 3, 0)
+        wave_types_layout.addWidget(triangle_test_button, 3, 1)
 
         wave_types_group.setLayout(wave_types_layout)
         layout.addRow(wave_types_group)
@@ -851,10 +922,10 @@ class SettingsWindow(QtWidgets.QDialog):
         freq_max_layout.addWidget(self.freq_max_spinbox)
         layout.addRow("Max Frequency:", freq_max_layout)
 
-        # Test Sound Button
-        test_sound_button = QtWidgets.QPushButton("Test Sound")
-        test_sound_button.clicked.connect(self.test_sound)
-        layout.addRow(test_sound_button)
+        # Test All Sounds Button (optional)
+        test_all_button = QtWidgets.QPushButton("Test All Selected")
+        test_all_button.clicked.connect(lambda: self.test_sound())
+        layout.addRow(test_all_button)
 
         tab.setLayout(layout)
         return tab
@@ -1026,20 +1097,23 @@ class SettingsWindow(QtWidgets.QDialog):
             self.color_button.setStyleSheet(f"background-color: {color.name()}; min-width: 60px; min-height: 30px;")
             self.update_preview()
 
-    def test_sound(self):
+    def test_sound(self, sound_type=None):
         # Create temporary config
         temp_config = self.config_manager.config.copy()
 
-        # Get selected sound types
-        sound_types = []
-        if self.sine_checkbox.isChecked():
-            sound_types.append("sine")
-        if self.square_checkbox.isChecked():
-            sound_types.append("square")
-        if self.sawtooth_checkbox.isChecked():
-            sound_types.append("sawtooth")
-        if self.triangle_checkbox.isChecked():
-            sound_types.append("triangle")
+        # Get selected sound types or use the provided one
+        if sound_type:
+            sound_types = [sound_type]
+        else:
+            sound_types = []
+            if self.sine_checkbox.isChecked():
+                sound_types.append("sine")
+            if self.square_checkbox.isChecked():
+                sound_types.append("square")
+            if self.sawtooth_checkbox.isChecked():
+                sound_types.append("sawtooth")
+            if self.triangle_checkbox.isChecked():
+                sound_types.append("triangle")
 
         # Ensure at least one type is selected
         if not sound_types:
@@ -1048,7 +1122,7 @@ class SettingsWindow(QtWidgets.QDialog):
         temp_config["sound"]["type"] = sound_types
         temp_config["sound"]["frequency_min"] = self.freq_min_slider.value()
         temp_config["sound"]["frequency_max"] = self.freq_max_slider.value()
-        temp_config["alarm"]["duration"] = 1  # Short duration for testing
+        temp_config["alarm"]["duration"] = 1.0  # Short duration for testing
 
         # Create temporary config manager with this config
         temp_config_manager = ConfigManager()
@@ -1091,7 +1165,15 @@ class SettingsWindow(QtWidgets.QDialog):
         old_alarm_enabled = self.config_manager.config["alarm"]["enabled"]
         self.config_manager.config["alarm"]["enabled"] = self.alarm_checkbox.isChecked()
         self.config_manager.config["alarm"]["duration"] = self.duration_spinbox.value()
-        self.config_manager.config["alarm"]["interval"] = self.interval_spinbox.value()
+
+        # Convert HH:MM:SS to total seconds for interval
+        total_seconds = (self.hours_spinbox.value() * 3600 +
+                         self.minutes_spinbox.value() * 60 +
+                         self.seconds_spinbox.value())
+        # Ensure minimum interval of 5 seconds
+        if total_seconds < 5:
+            total_seconds = 5
+        self.config_manager.config["alarm"]["interval"] = total_seconds
 
         # Sound settings
         sound_types = []
@@ -1115,14 +1197,14 @@ class SettingsWindow(QtWidgets.QDialog):
         # Save to file
         self.config_manager.save_config()
 
-        # Apply changes to clock
-        self.parent.apply_config()
-        self.parent.drag_enabled = self.drag_checkbox.isChecked()
+        # Apply changes to both windows if they exist
+        if self.clock:
+            self.clock.apply_config()
+            self.clock.drag_enabled = self.drag_checkbox.isChecked()
 
-        # Apply changes to countdown clock if parent is countdown
-        if hasattr(self.parent, 'countdown_label'):
-            self.parent.apply_config()
-            self.parent.drag_enabled = self.drag_checkbox.isChecked()
+        if self.countdown:
+            self.countdown.apply_config()
+            self.countdown.drag_enabled = self.drag_checkbox.isChecked()
 
         # Handle alarm state - this will take care of showing/hiding the countdown
         if self.alarm_checkbox.isChecked() and not old_alarm_enabled:
@@ -1202,7 +1284,8 @@ class SystemTrayIcon(QtWidgets.QSystemTrayIcon):
         self.config_manager.save_config()
 
     def show_settings(self):
-        settings_window = SettingsWindow(self.clock, self.config_manager, self.alarm_manager)
+        settings_window = SettingsWindow(self.clock, self.config_manager, self.alarm_manager,
+                                         clock=self.clock, countdown=self.countdown)
         settings_window.exec()
         # Update alarm action state after settings might have changed
         self.alarm_action.setChecked(self.alarm_manager.active)
@@ -1220,17 +1303,16 @@ def main():
     # Set these environment variables before QApplication is created if you need custom scaling
     # os.environ["QT_ENABLE_HIGHDPI_SCALING"] = "1"  # Already on by default in Qt 6
     # os.environ["QT_SCALE_FACTOR"] = "1"  # Can be used to force a specific scale factor
-
-    app = QtWidgets.QApplication(sys.argv)
-
-    # Important: Set this to keep app running when all windows are closed
-    app.setQuitOnLastWindowClosed(False)
-
     # Modern way to handle screen scaling in Qt 6
     # Default is already set to PerMonitorV2 in Qt 6
     if hasattr(QtCore, 'Qt'):
         QtGui.QGuiApplication.setHighDpiScaleFactorRoundingPolicy(
             QtCore.Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
+
+    app = QtWidgets.QApplication(sys.argv)
+
+    # Important: Set this to keep app running when all windows are closed
+    app.setQuitOnLastWindowClosed(False)
 
     config_manager = ConfigManager()
     sound_generator = SoundGenerator(config_manager)

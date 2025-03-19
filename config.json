@@ -6,11 +6,11 @@
         ],
         "font": "Bahnschrift",
         "text_size": 36,
-        "opacity": 0.8,
+        "opacity": 1.0,
         "color": "#ff0004",
         "position": [
-            799,
-            16
+            807,
+            -21
         ]
     },
     "countdown": {
@@ -19,17 +19,17 @@
             100
         ],
         "font": "Cascadia Code",
-        "text_size": 12,
+        "text_size": 17,
         "opacity": 1.0,
         "color": "#f2ff00",
         "position": [
-            987,
-            14
+            1020,
+            -26
         ]
     },
     "alarm": {
         "enabled": true,
-        "duration": 1,
+        "duration": 1.0,
         "interval": 300
     },
     "sound": {
