@@ -29,7 +29,7 @@
     },
     "alarm": {
         "enabled": true,
-        "duration": 0.4,
+        "duration": 0.5,
         "interval": 120
     },
     "sound": {

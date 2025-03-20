@@ -1,13 +1,82 @@
 import sys
-import json
 import os
-import time
-import threading
-import random
-import numpy as np
-import simpleaudio as sa
-import datetime
-from PySide6 import QtWidgets, QtGui, QtCore
+import importlib.util
+
+def install_dependencies():
+    """Check and install missing dependencies"""
+    # Check if pip is installed
+    try:
+        import pip
+    except ImportError:
+        print("Installing pip...")
+        os.system("curl https://bootstrap.pypa.io/get-pip.py -o get-pip.py")
+        os.system(f"{sys.executable} get-pip.py")
+        os.system("rm get-pip.py")
+        print("Pip installed successfully.")
+
+    # Define dependencies with package name and import name (if different)
+    dependencies = [
+        ("numpy", "numpy"),
+        ("simpleaudio-patched", "simpleaudio"),
+        ("PySide6", "PySide6")
+    ]
+
+    # Check which packages are missing
+    missing_packages = []
+    for package, import_name in dependencies:
+        if not importlib.util.find_spec(import_name):
+            missing_packages.append(package)
+
+    # Install missing packages
+    if missing_packages:
+        print(f"Missing packages: {', '.join(missing_packages)}")
+        print("Installing missing dependencies...")
+
+        for package in missing_packages:
+            print(f"Installing {package}...")
+            os.system(f"{sys.executable} -m pip install {package}")
+            print(f"Finished installing {package}.")
+    else:
+        print("All dependencies are already installed.")
+
+    print("Setup complete.")
+
+    # Restart the script to ensure imports work properly
+    print("Restarting application with dependencies...")
+    os.execv(sys.executable, ['python'] + sys.argv)
+
+
+# Try to import required packages, install if they're missing
+try:
+    import json
+    import time
+    import threading
+    import queue
+    import random
+    import numpy as np
+    import simpleaudio as sa
+    import datetime
+    from PySide6 import QtWidgets, QtGui, QtCore
+except ImportError:
+    print("Missing dependencies detected. Installing now...")
+    install_dependencies()
+    # Script will restart after dependencies are installed
+
+
+def failsafe_beep():
+    """Last resort system beep that bypasses everything else"""
+    try:
+        # Try Windows beep
+        import winsound
+        winsound.Beep(1000, 500)
+    except:
+        try:
+            # Try console bell
+            import os
+            os.system('echo -e "\a"')
+        except:
+            pass  # We tried our best
+
 
 class ConfigManager:
     def __init__(self, config_file="config.json"):
@@ -61,14 +130,115 @@ class ConfigManager:
         with open(self.config_file, 'w') as f:
             json.dump(self.config, f, indent=4)
 
+
 class SoundGenerator:
     def __init__(self, config_manager):
         self.config_manager = config_manager
         self.playing = False
         self.sample_rate = 44100
-        self.play_obj = None
-        self._lock = threading.Lock()  # Add a lock for thread safety
+        self._lock = threading.Lock()
 
+        # Create a dedicated sound queue and worker thread
+        self.sound_queue = queue.Queue()
+        self.worker_thread = threading.Thread(target=self._sound_worker, daemon=True)
+        self.worker_thread.start()
+
+        # Backup simple beep for fallback
+        self._backup_wave = self._create_backup_beep()
+
+    def _create_backup_beep(self):
+        """Create a simple beep sound as fallback"""
+        t = np.linspace(0, 0.5, int(0.5 * self.sample_rate), False)
+        wave = np.sin(2 * np.pi * 800 * t) * 0.5
+        return (wave * 32767).astype(np.int16)
+
+    def _sound_worker(self):
+        """Background thread that processes sound requests"""
+        while True:
+            try:
+                # Wait for sound request (blocking)
+                _ = self.sound_queue.get(block=True)
+
+                # Actually play sound with timeout protection
+                self._play_sound_safe()
+
+                # Mark task as done
+                self.sound_queue.task_done()
+            except Exception as e:
+                print(f"Sound worker error (continuing anyway): {e}")
+
+    def _play_sound_safe(self):
+        """Play sound with extra safety measures"""
+        with self._lock:
+            self.playing = True
+            try:
+                # Get configuration (with fallbacks)
+                try:
+                    sound_config = self.config_manager.config["sound"]
+                    alarm_config = self.config_manager.config["alarm"]
+                    sound_types = sound_config.get("type", ["sine"])
+                    min_freq = sound_config.get("frequency_min", 500)
+                    max_freq = sound_config.get("frequency_max", 800)
+                    duration = alarm_config.get("duration", 1.0)
+                    selected_type = random.choice(sound_types)
+                    selected_frequency = random.randint(min_freq, max_freq)
+                except Exception:
+                    # If any config reading fails, use defaults
+                    selected_type = "sine"
+                    selected_frequency = 800
+                    duration = 1.0
+
+                # Generate wave with proper error handling
+                try:
+                    if selected_type == "sine":
+                        wave = self.generate_sine_wave(selected_frequency, duration)
+                    elif selected_type == "square":
+                        wave = self.generate_square_wave(selected_frequency, duration)
+                    elif selected_type == "sawtooth":
+                        wave = self.generate_sawtooth_wave(selected_frequency, duration)
+                    else:  # triangle
+                        wave = self.generate_triangle_wave(selected_frequency, duration)
+
+                    # Convert to stereo
+                    audio = np.column_stack((wave, wave))
+                except Exception as e:
+                    print(f"Wave generation failed, using backup: {e}")
+                    audio = np.column_stack((self._backup_wave, self._backup_wave))
+
+                # Play with timeout protection
+                try:
+                    play_obj = sa.play_buffer(audio, 2, 2, self.sample_rate)
+
+                    # Set a maximum wait time (don't block forever)
+                    max_wait_time = min(duration * 2, 10)  # Max 10 seconds
+                    wait_start = time.time()
+
+                    while play_obj.is_playing() and (time.time() - wait_start < max_wait_time):
+                        time.sleep(0.1)
+
+                    # Force stop if still playing after timeout
+                    if play_obj.is_playing():
+                        play_obj.stop()
+                except Exception as e:
+                    print(f"Audio playback failed: {e}")
+                    # Try system beep as last resort
+                    failsafe_beep()
+            except Exception as e:
+                print(f"Unexpected sound error: {e}")
+                failsafe_beep()  # Try one more time
+            finally:
+                self.playing = False
+
+    def play_sound(self):
+        """Queue a sound to be played"""
+        try:
+            # Just put a request in the queue, worker thread handles the rest
+            self.sound_queue.put(True, block=False)
+        except:
+            # If queue is full, that's ok (sound will play again soon)
+            pass
+
+    # Keep the original wave generation methods
     def generate_sine_wave(self, frequency, duration):
         t = np.linspace(0, duration, int(duration * self.sample_rate), False)
         wave = np.sin(2 * np.pi * frequency * t) * 0.5
@@ -90,51 +260,6 @@ class SoundGenerator:
         wave = wave * 0.5
         return (wave * 32767).astype(np.int16)
 
-    def play_sound(self):
-        with self._lock:  # Ensure only one thread modifies state at a time
-            if self.playing:
-                return  # Don't start a new sound if one is already playing
-
-            sound_config = self.config_manager.config["sound"]
-            alarm_config = self.config_manager.config["alarm"]
-
-            # Randomly select a wave type from the available types
-            sound_types = sound_config["type"]
-            selected_type = random.choice(sound_types)
-
-            # Randomly select a frequency within the specified range
-            min_freq = sound_config["frequency_min"]
-            max_freq = sound_config["frequency_max"]
-            selected_frequency = random.randint(min_freq, max_freq)
-
-            duration = alarm_config["duration"]
-
-            if selected_type == "sine":
-                wave = self.generate_sine_wave(selected_frequency, duration)
-            elif selected_type == "square":
-                wave = self.generate_square_wave(selected_frequency, duration)
-            elif selected_type == "sawtooth":
-                wave = self.generate_sawtooth_wave(selected_frequency, duration)
-            else:  # triangle
-                wave = self.generate_triangle_wave(selected_frequency, duration)
-
-            # Convert to stereo
-            audio = np.column_stack((wave, wave))
-
-            # Play sound
-            if self.play_obj:
-                self.play_obj.stop()  # Stop any previous sound
-
-            self.playing = True
-            try:
-                self.play_obj = sa.play_buffer(audio, 2, 2, self.sample_rate)
-                self.play_obj.wait_done()
-            except Exception as e:
-                print(f"Sound playback error: {e}")
-            finally:
-                self.playing = False
-                # Clear reference to play_obj
-                self.play_obj = None
 
 class AlarmManager:
     def __init__(self, config_manager, sound_generator, countdown=None):
@@ -144,11 +269,36 @@ class AlarmManager:
         self.timer = QtCore.QTimer()
         self.timer.timeout.connect(self.alarm_callback)
         self.last_trigger_time = QtCore.QDateTime.currentMSecsSinceEpoch()
-        self.countdown = countdown  # Store reference to countdown window
+        self.countdown = countdown
+
+        # Watchdog timer to ensure regular alarms
+        self.watchdog_timer = QtCore.QTimer()
+        self.watchdog_timer.timeout.connect(self.watchdog_check)
+        self.watchdog_timer.start(5000)  # Check every 5 seconds
 
     # Add a method to set the countdown reference if it wasn't available at initialization
     def set_countdown(self, countdown):
         self.countdown = countdown
+
+    def watchdog_check(self):
+        """Make sure alarms are triggering when they should be"""
+        if not self.active:
+            return
+
+        current_time = QtCore.QDateTime.currentMSecsSinceEpoch()
+        try:
+            interval_ms = self.config_manager.config["alarm"]["interval"] * 1000
+        except:
+            interval_ms = 30000  # Default to 30 seconds if config fails
+
+        time_since_last = current_time - self.last_trigger_time
+
+        # If we're more than 2 seconds past when we should have triggered,
+        # force a trigger now
+        if time_since_last > (interval_ms + 2000):
+            print(f"Watchdog: Alarm missed! Forcing trigger now")
+            self.last_trigger_time = current_time - interval_ms  # Adjust to maintain timing
+            self.alarm_callback()
 
     def start_alarm(self):
         if self.active:
@@ -157,7 +307,11 @@ class AlarmManager:
         self.active = True
         # Initialize last trigger time
         self.last_trigger_time = QtCore.QDateTime.currentMSecsSinceEpoch()
-        interval = self.config_manager.config["alarm"]["interval"] * 1000
+        try:
+            interval = self.config_manager.config["alarm"]["interval"] * 1000
+        except:
+            interval = 30000  # Default to 30 seconds if config fails
+
         self.timer.start(interval)
 
         # Show countdown if available
@@ -176,24 +330,27 @@ class AlarmManager:
         # Update last trigger time
         self.last_trigger_time = QtCore.QDateTime.currentMSecsSinceEpoch()
 
-        # Play sound in a separate thread
-        sound_thread = threading.Thread(target=self.sound_generator.play_sound)
-        sound_thread.daemon = False
-        sound_thread.start()
+        # Play sound directly - no more threading here
+        self.sound_generator.play_sound()
 
         # Update interval in case it was changed in settings
-        interval = self.config_manager.config["alarm"]["interval"] * 1000
-        self.timer.setInterval(interval)
+        try:
+            interval = self.config_manager.config["alarm"]["interval"] * 1000
+            self.timer.setInterval(interval)
+        except:
+            # If we can't read config, use default 30 seconds
+            self.timer.setInterval(30000)
+
 
 class CountdownOverlay(QtWidgets.QMainWindow):
     def __init__(self, config_manager, alarm_manager):
-        super().__init__(flags=QtCore.Qt.FramelessWindowHint | QtCore.Qt.WindowStaysOnTopHint | QtCore.Qt.Tool)
+        super().__init__(flags=QtCore.Qt.WindowType.FramelessWindowHint | QtCore.Qt.WindowType.WindowStaysOnTopHint  | QtCore.Qt.WindowType.Tool)
 
         self.config_manager = config_manager
         self.alarm_manager = alarm_manager
 
         # Create transparent background
-        self.setAttribute(QtCore.Qt.WA_TranslucentBackground)
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground)
 
         # Create central widget
         central_widget = QtWidgets.QWidget()
@@ -205,7 +362,7 @@ class CountdownOverlay(QtWidgets.QMainWindow):
 
         # Create countdown label
         self.countdown_label = QtWidgets.QLabel()
-        self.countdown_label.setAlignment(QtCore.Qt.AlignCenter)
+        self.countdown_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
 
         # Set up font from config
         self.apply_config()
@@ -224,7 +381,7 @@ class CountdownOverlay(QtWidgets.QMainWindow):
         self.dragging = False
 
         # Right-click context menu
-        self.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
+        self.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
         self.customContextMenuRequested.connect(self.show_context_menu)
 
         # Initially hide if alarm is disabled
@@ -245,9 +402,9 @@ class CountdownOverlay(QtWidgets.QMainWindow):
         font_size = countdown_config["text_size"]
         color = countdown_config["color"]
 
-        # Create font with anti-aliasing
+        # Create font with antialiasing
         font = QtGui.QFont(font_family, font_size)
-        font.setStyleStrategy(QtGui.QFont.PreferAntialias)
+        font.setStyleStrategy(QtGui.QFont.StyleStrategy.PreferAntialias)
         self.countdown_label.setFont(font)
 
         # Set text color
@@ -261,7 +418,11 @@ class CountdownOverlay(QtWidgets.QMainWindow):
             self.show()
 
         # Calculate time until next alarm
-        interval_ms = self.config_manager.config["alarm"]["interval"] * 1000
+        try:
+            interval_ms = self.config_manager.config["alarm"]["interval"] * 1000
+        except:
+            interval_ms = 30000  # Default to 30 seconds if config fails
+
         current_time = QtCore.QDateTime.currentMSecsSinceEpoch()
         elapsed_ms = (current_time - self.alarm_manager.last_trigger_time) % interval_ms
         remaining_ms = interval_ms - elapsed_ms
@@ -277,13 +438,13 @@ class CountdownOverlay(QtWidgets.QMainWindow):
         self.countdown_label.setText(countdown_text)
 
     def mousePressEvent(self, event):
-        if event.button() == QtCore.Qt.LeftButton and self.drag_enabled:
+        if event.button() == QtCore.Qt.MouseButton.LeftButton and self.drag_enabled:
             self.dragging = True
             self.drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
             event.accept()
 
     def mouseMoveEvent(self, event):
-        if self.dragging and event.buttons() & QtCore.Qt.LeftButton and self.drag_enabled:
+        if self.dragging and event.buttons() & QtCore.Qt.MouseButton.LeftButton and self.drag_enabled:
             self.move(event.globalPosition().toPoint() - self.drag_pos)
             # Update position in config
             self.config_manager.config["countdown"]["position"] = [self.x(), self.y()]
@@ -291,7 +452,7 @@ class CountdownOverlay(QtWidgets.QMainWindow):
             event.accept()
 
     def mouseReleaseEvent(self, event):
-        if event.button() == QtCore.Qt.LeftButton:
+        if event.button() == QtCore.Qt.MouseButton.LeftButton:
             self.dragging = False
 
     def show_context_menu(self, point):
@@ -313,15 +474,16 @@ class CountdownOverlay(QtWidgets.QMainWindow):
         elif action == quit_action:
             QtWidgets.QApplication.instance().quit()
 
+
 class ClockOverlay(QtWidgets.QMainWindow):
     def __init__(self, config_manager, alarm_manager):
-        super().__init__(flags=QtCore.Qt.FramelessWindowHint | QtCore.Qt.WindowStaysOnTopHint | QtCore.Qt.Tool)
+        super().__init__(flags=QtCore.Qt.WindowType.FramelessWindowHint | QtCore.Qt.WindowType.WindowStaysOnTopHint | QtCore.Qt.WindowType.Tool)
 
         self.config_manager = config_manager
         self.alarm_manager = alarm_manager
 
         # Create transparent background
-        self.setAttribute(QtCore.Qt.WA_TranslucentBackground)
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground)
 
         # Create central widget
         central_widget = QtWidgets.QWidget()
@@ -333,7 +495,7 @@ class ClockOverlay(QtWidgets.QMainWindow):
 
         # Create time label
         self.time_label = QtWidgets.QLabel()
-        self.time_label.setAlignment(QtCore.Qt.AlignCenter)
+        self.time_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
 
         # Set up font from config
         self.apply_config()
@@ -352,7 +514,7 @@ class ClockOverlay(QtWidgets.QMainWindow):
         self.dragging = False
 
         # Right-click context menu
-        self.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
+        self.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
         self.customContextMenuRequested.connect(self.show_context_menu)
 
     def apply_config(self):
@@ -370,9 +532,9 @@ class ClockOverlay(QtWidgets.QMainWindow):
         font_size = clock_config["text_size"]
         color = clock_config["color"]
 
-        # Create font with anti-aliasing
+        # Create font with antialiasing
         font = QtGui.QFont(font_family, font_size)
-        font.setStyleStrategy(QtGui.QFont.PreferAntialias)
+        font.setStyleStrategy(QtGui.QFont.StyleStrategy.PreferAntialias)
         self.time_label.setFont(font)
 
         # Set text color
@@ -383,13 +545,13 @@ class ClockOverlay(QtWidgets.QMainWindow):
         self.time_label.setText(current_time)
 
     def mousePressEvent(self, event):
-        if event.button() == QtCore.Qt.LeftButton and self.drag_enabled:
+        if event.button() == QtCore.Qt.MouseButton.LeftButton and self.drag_enabled:
             self.dragging = True
             self.drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
             event.accept()
 
     def mouseMoveEvent(self, event):
-        if self.dragging and event.buttons() & QtCore.Qt.LeftButton and self.drag_enabled:
+        if self.dragging and event.buttons() & QtCore.Qt.MouseButton.LeftButton and self.drag_enabled:
             self.move(event.globalPosition().toPoint() - self.drag_pos)
             # Update position in config
             self.config_manager.config["clock"]["position"] = [self.x(), self.y()]
@@ -397,7 +559,7 @@ class ClockOverlay(QtWidgets.QMainWindow):
             event.accept()
 
     def mouseReleaseEvent(self, event):
-        if event.button() == QtCore.Qt.LeftButton:
+        if event.button() == QtCore.Qt.MouseButton.LeftButton:
             self.dragging = False
 
     def show_context_menu(self, point):
@@ -419,18 +581,19 @@ class ClockOverlay(QtWidgets.QMainWindow):
         elif action == quit_action:
             QtWidgets.QApplication.instance().quit()
 
+
 class FontComboBox(QtWidgets.QComboBox):
     """Custom combobox specifically for font selection with search capabilities"""
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setEditable(True)
-        self.setInsertPolicy(QtWidgets.QComboBox.NoInsert)  # Don't add search text as an item
+        self.setInsertPolicy(QtWidgets.QComboBox.InsertPolicy.NoInsert)  # Don't add search text as an item
 
         # Configure completer for better search
         completer = self.completer()
-        completer.setFilterMode(QtCore.Qt.MatchContains)  # Match anywhere in the text
-        completer.setCaseSensitivity(QtCore.Qt.CaseInsensitive)  # Case insensitive matching
+        completer.setFilterMode(QtCore.Qt.MatchFlag.MatchContains)  # Match anywhere in the text
+        completer.setCaseSensitivity(QtCore.Qt.CaseSensitivity.CaseInsensitive)  # Case-insensitive matching
 
         # Set reasonable max visible items
         self.setMaxVisibleItems(15)
@@ -454,7 +617,7 @@ class FontComboBox(QtWidgets.QComboBox):
                 # Add font to combobox with font preview
                 self.addItem(font)
                 # Set the item's font to itself for preview
-                self.setItemData(self.count() - 1, QtGui.QFont(font), QtCore.Qt.FontRole)
+                self.setItemData(self.count() - 1, QtGui.QFont(font), QtCore.Qt.ItemDataRole.FontRole)
 
         return compatible_fonts
 
@@ -481,7 +644,7 @@ class FontComboBox(QtWidgets.QComboBox):
                 return False
 
             # Additional check: if font defaults to a fallback font, it might be special purpose
-            test_font.setStyleHint(QtGui.QFont.AnyStyle, QtGui.QFont.PreferMatch)
+            test_font.setStyleHint(QtGui.QFont.StyleHint.AnyStyle, QtGui.QFont.StyleStrategy.PreferMatch)
             if test_font.exactMatch():
                 return True
 
@@ -496,12 +659,13 @@ class FontComboBox(QtWidgets.QComboBox):
         except:
             return False
 
+
 class FontItemDelegate(QtWidgets.QStyledItemDelegate):
     """Custom delegate to render font names in their own font"""
 
     def paint(self, painter, option, index):
         # Get the font for this item
-        item_font = index.data(QtCore.Qt.FontRole)
+        item_font = index.data(QtCore.Qt.ItemDataRole.FontRole)
         if item_font:
             # Create a copy of the option to modify
             option_copy = QtWidgets.QStyleOptionViewItem(option)
@@ -510,7 +674,7 @@ class FontItemDelegate(QtWidgets.QStyledItemDelegate):
             option_copy.font = item_font
 
             # Handle selection state
-            if option.state & QtWidgets.QStyle.State_Selected:
+            if option.state & QtWidgets.QStyle.StateFlag.State_Selected:
                 painter.fillRect(option.rect, option.palette.highlight())
                 painter.setPen(option.palette.highlightedText().color())
             else:
@@ -518,11 +682,12 @@ class FontItemDelegate(QtWidgets.QStyledItemDelegate):
 
             # Draw the text
             painter.setFont(item_font)
-            text = index.data(QtCore.Qt.DisplayRole)
-            painter.drawText(option.rect.adjusted(5, 2, -5, -2), QtCore.Qt.AlignVCenter, text)
+            text = index.data(QtCore.Qt.ItemDataRole.DisplayRole)
+            painter.drawText(option.rect.adjusted(5, 2, -5, -2), QtCore.Qt.AlignmentFlag.AlignVCenter, text)
         else:
             # Fall back to default rendering if no font is set
             super().paint(painter, option, index)
+
 
 class SettingsWindow(QtWidgets.QDialog):
     def __init__(self, parent, config_manager, alarm_manager, clock=None, countdown=None):
@@ -541,7 +706,7 @@ class SettingsWindow(QtWidgets.QDialog):
 
         # Set window properties
         self.setWindowTitle("Clock Settings")
-        self.setWindowFlags(self.windowFlags() & ~QtCore.Qt.WindowContextHelpButtonHint)
+        self.setWindowFlags(self.windowFlags() & ~QtCore.Qt.WindowType.WindowContextHelpButtonHint)
         self.setMinimumWidth(400)  # Ensure dialog is wide enough for font list
 
         # Create tab widget
@@ -560,7 +725,7 @@ class SettingsWindow(QtWidgets.QDialog):
         tab_widget.addTab(sound_tab, "Sound")
 
         # Create buttons
-        button_box = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Save | QtWidgets.QDialogButtonBox.Cancel)
+        button_box = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.StandardButton.Save | QtWidgets.QDialogButtonBox.StandardButton.Cancel)
         button_box.accepted.connect(self.save_settings)
         button_box.rejected.connect(self.reject)
 
@@ -578,7 +743,7 @@ class SettingsWindow(QtWidgets.QDialog):
         layout = QtWidgets.QFormLayout()
 
         # Width
-        self.width_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.width_slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
         self.width_slider.setRange(150, 500)
         self.width_slider.setValue(self.config_manager.config["clock"]["size"][0])
 
@@ -597,7 +762,7 @@ class SettingsWindow(QtWidgets.QDialog):
         layout.addRow("Width:", width_layout)
 
         # Height
-        self.height_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.height_slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
         self.height_slider.setRange(80, 200)
         self.height_slider.setValue(self.config_manager.config["clock"]["size"][1])
 
@@ -629,7 +794,7 @@ class SettingsWindow(QtWidgets.QDialog):
         self.load_fonts_thread.start()
 
         # Text Size
-        self.text_size_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.text_size_slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
         self.text_size_slider.setRange(10, 72)
         self.text_size_slider.setValue(self.config_manager.config["clock"]["text_size"])
 
@@ -648,7 +813,7 @@ class SettingsWindow(QtWidgets.QDialog):
         layout.addRow("Text Size:", text_size_layout)
 
         # Opacity
-        self.opacity_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.opacity_slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
         self.opacity_slider.setRange(1, 10)
         self.opacity_slider.setValue(int(self.config_manager.config["clock"]["opacity"] * 10))
 
@@ -681,12 +846,12 @@ class SettingsWindow(QtWidgets.QDialog):
 
         # Font preview
         self.preview_frame = QtWidgets.QFrame()
-        self.preview_frame.setFrameShape(QtWidgets.QFrame.StyledPanel)
+        self.preview_frame.setFrameShape(QtWidgets.QFrame.Shape.StyledPanel)
         self.preview_frame.setMinimumHeight(60)
         self.preview_layout = QtWidgets.QVBoxLayout(self.preview_frame)
 
         self.preview_label = QtWidgets.QLabel("12:34:56 PM")
-        self.preview_label.setAlignment(QtCore.Qt.AlignCenter)
+        self.preview_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         self.preview_layout.addWidget(self.preview_label)
 
         layout.addRow("Preview:", self.preview_frame)
@@ -707,7 +872,7 @@ class SettingsWindow(QtWidgets.QDialog):
         try:
             # Update UI from main thread
             QtCore.QMetaObject.invokeMethod(loading_label, "setText",
-                                            QtCore.Qt.QueuedConnection,
+                                            QtCore.Qt.ConnectionType.QueuedConnection,
                                             QtCore.Q_ARG(str, "Scanning system fonts..."))
 
             # This might take a moment
@@ -718,12 +883,12 @@ class SettingsWindow(QtWidgets.QDialog):
 
             # Update combo box selection from main thread
             QtCore.QMetaObject.invokeMethod(self.font_combo, "setCurrentText",
-                                            QtCore.Qt.QueuedConnection,
+                                            QtCore.Qt.ConnectionType.QueuedConnection,
                                             QtCore.Q_ARG(str, current_font))
 
             # Update label from main thread
             QtCore.QMetaObject.invokeMethod(loading_label, "setText",
-                                            QtCore.Qt.QueuedConnection,
+                                            QtCore.Qt.ConnectionType.QueuedConnection,
                                             QtCore.Q_ARG(str, f"Found {len(compatible_fonts)} compatible fonts"))
 
             # Update preview when fonts are loaded - use QTimer instead
@@ -733,7 +898,7 @@ class SettingsWindow(QtWidgets.QDialog):
             print(f"Error loading fonts: {e}")
             # Update UI from main thread
             QtCore.QMetaObject.invokeMethod(loading_label, "setText",
-                                            QtCore.Qt.QueuedConnection,
+                                            QtCore.Qt.ConnectionType.QueuedConnection,
                                             QtCore.Q_ARG(str, f"Error loading fonts: {e}"))
 
     def update_preview(self):
@@ -749,7 +914,7 @@ class SettingsWindow(QtWidgets.QDialog):
 
             # Create font
             font = QtGui.QFont(font_name, font_size)
-            font.setStyleStrategy(QtGui.QFont.PreferAntialias)
+            font.setStyleStrategy(QtGui.QFont.StyleStrategy.PreferAntialias)
 
             # Update preview
             self.preview_label.setFont(font)
@@ -767,7 +932,7 @@ class SettingsWindow(QtWidgets.QDialog):
         layout.addRow("Enable Alarm:", self.alarm_checkbox)
 
         # Duration (with decimal control as requested earlier)
-        self.duration_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.duration_slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
         self.duration_slider.setRange(1, 100)  # Range from 0.1 to 10.0 seconds
         current_duration = self.config_manager.config["alarm"]["duration"]
         self.duration_slider.setValue(int(current_duration * 10))  # Convert to slider value
@@ -839,6 +1004,11 @@ class SettingsWindow(QtWidgets.QDialog):
         self.minutes_spinbox.valueChanged.connect(check_all_zeros)
         self.seconds_spinbox.valueChanged.connect(check_all_zeros)
 
+        # Add test button
+        test_alarm_button = QtWidgets.QPushButton("Test Alarm Now")
+        test_alarm_button.clicked.connect(lambda: self.alarm_manager.sound_generator.play_sound())
+        layout.addRow(test_alarm_button)
+
         tab.setLayout(layout)
         return tab
 
@@ -885,7 +1055,7 @@ class SettingsWindow(QtWidgets.QDialog):
         layout.addRow(wave_types_group)
 
         # Min Frequency
-        self.freq_min_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.freq_min_slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
         self.freq_min_slider.setRange(200, 1000)
         self.freq_min_slider.setValue(self.config_manager.config["sound"]["frequency_min"])
 
@@ -904,7 +1074,7 @@ class SettingsWindow(QtWidgets.QDialog):
         layout.addRow("Min Frequency:", freq_min_layout)
 
         # Max Frequency
-        self.freq_max_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.freq_max_slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
         self.freq_max_slider.setRange(400, 2000)
         self.freq_max_slider.setValue(self.config_manager.config["sound"]["frequency_max"])
 
@@ -927,6 +1097,11 @@ class SettingsWindow(QtWidgets.QDialog):
         test_all_button.clicked.connect(lambda: self.test_sound())
         layout.addRow(test_all_button)
 
+        # Test System Beep (failsafe)
+        test_failsafe_button = QtWidgets.QPushButton("Test Failsafe Beep")
+        test_failsafe_button.clicked.connect(failsafe_beep)
+        layout.addRow(test_failsafe_button)
+
         tab.setLayout(layout)
         return tab
 
@@ -935,7 +1110,7 @@ class SettingsWindow(QtWidgets.QDialog):
         layout = QtWidgets.QFormLayout()
 
         # Width
-        self.countdown_width_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.countdown_width_slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
         self.countdown_width_slider.setRange(150, 500)
         self.countdown_width_slider.setValue(self.config_manager.config["countdown"]["size"][0])
 
@@ -954,7 +1129,7 @@ class SettingsWindow(QtWidgets.QDialog):
         layout.addRow("Width:", width_layout)
 
         # Height
-        self.countdown_height_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.countdown_height_slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
         self.countdown_height_slider.setRange(80, 200)
         self.countdown_height_slider.setValue(self.config_manager.config["countdown"]["size"][1])
 
@@ -980,7 +1155,7 @@ class SettingsWindow(QtWidgets.QDialog):
         QtCore.QTimer.singleShot(1000, self.populate_countdown_fonts)
 
         # Text Size
-        self.countdown_text_size_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.countdown_text_size_slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
         self.countdown_text_size_slider.setRange(10, 72)
         self.countdown_text_size_slider.setValue(self.config_manager.config["countdown"]["text_size"])
 
@@ -999,7 +1174,7 @@ class SettingsWindow(QtWidgets.QDialog):
         layout.addRow("Text Size:", text_size_layout)
 
         # Opacity
-        self.countdown_opacity_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.countdown_opacity_slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
         self.countdown_opacity_slider.setRange(1, 10)
         self.countdown_opacity_slider.setValue(int(self.config_manager.config["countdown"]["opacity"] * 10))
 
@@ -1029,12 +1204,12 @@ class SettingsWindow(QtWidgets.QDialog):
 
         # Font preview
         self.countdown_preview_frame = QtWidgets.QFrame()
-        self.countdown_preview_frame.setFrameShape(QtWidgets.QFrame.StyledPanel)
+        self.countdown_preview_frame.setFrameShape(QtWidgets.QFrame.Shape.StyledPanel)
         self.countdown_preview_frame.setMinimumHeight(60)
         self.countdown_preview_layout = QtWidgets.QVBoxLayout(self.countdown_preview_frame)
 
         self.countdown_preview_label = QtWidgets.QLabel("00:00:30.00")
-        self.countdown_preview_label.setAlignment(QtCore.Qt.AlignCenter)
+        self.countdown_preview_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         self.countdown_preview_layout.addWidget(self.countdown_preview_label)
 
         layout.addRow("Preview:", self.countdown_preview_frame)
@@ -1082,7 +1257,7 @@ class SettingsWindow(QtWidgets.QDialog):
 
             # Create font
             font = QtGui.QFont(font_name, font_size)
-            font.setStyleStrategy(QtGui.QFont.PreferAntialias)
+            font.setStyleStrategy(QtGui.QFont.StyleStrategy.PreferAntialias)
 
             # Update preview
             self.countdown_preview_label.setFont(font)
@@ -1124,15 +1299,28 @@ class SettingsWindow(QtWidgets.QDialog):
         temp_config["sound"]["frequency_max"] = self.freq_max_slider.value()
         temp_config["alarm"]["duration"] = 1.0  # Short duration for testing
 
-        # Create temporary config manager with this config
-        temp_config_manager = ConfigManager()
-        temp_config_manager.config = temp_config
+        # Update main config manager with these sound settings temporarily
+        # This avoids creating a new sound manager just for testing
+        saved_types = self.config_manager.config["sound"]["type"]
+        saved_min = self.config_manager.config["sound"]["frequency_min"]
+        saved_max = self.config_manager.config["sound"]["frequency_max"]
+        saved_duration = self.config_manager.config["alarm"]["duration"]
 
-        # Create temporary sound generator
-        sound_generator = SoundGenerator(temp_config_manager)
+        try:
+            # Temporarily update for testing
+            self.config_manager.config["sound"]["type"] = sound_types
+            self.config_manager.config["sound"]["frequency_min"] = self.freq_min_slider.value()
+            self.config_manager.config["sound"]["frequency_max"] = self.freq_max_slider.value()
+            self.config_manager.config["alarm"]["duration"] = 1.0
 
-        # Play sound in separate thread
-        threading.Thread(target=sound_generator.play_sound).start()
+            # Play using the actual sound generator
+            self.alarm_manager.sound_generator.play_sound()
+        finally:
+            # Restore original settings
+            self.config_manager.config["sound"]["type"] = saved_types
+            self.config_manager.config["sound"]["frequency_min"] = saved_min
+            self.config_manager.config["sound"]["frequency_max"] = saved_max
+            self.config_manager.config["alarm"]["duration"] = saved_duration
 
     def save_settings(self):
         # Get color from button
@@ -1213,6 +1401,7 @@ class SettingsWindow(QtWidgets.QDialog):
             self.alarm_manager.stop_alarm()
 
         self.accept()
+
 
 class SystemTrayIcon(QtWidgets.QSystemTrayIcon):
     def __init__(self, app, clock, countdown, alarm_manager, config_manager):
@@ -1295,16 +1484,12 @@ class SystemTrayIcon(QtWidgets.QSystemTrayIcon):
 
     def on_activated(self, reason):
         # If double-clicked or clicked, show/hide the clock
-        if reason == QtWidgets.QSystemTrayIcon.DoubleClick or reason == QtWidgets.QSystemTrayIcon.Trigger:
+        if reason == QtWidgets.QSystemTrayIcon.ActivationReason.DoubleClick or reason == QtWidgets.QSystemTrayIcon.ActivationReason.Trigger:
             self.toggle_clock()
 
+
 def main():
-    # For Qt 6 (PySide6), high DPI scaling is enabled by default
-    # Set these environment variables before QApplication is created if you need custom scaling
-    # os.environ["QT_ENABLE_HIGHDPI_SCALING"] = "1"  # Already on by default in Qt 6
-    # os.environ["QT_SCALE_FACTOR"] = "1"  # Can be used to force a specific scale factor
-    # Modern way to handle screen scaling in Qt 6
-    # Default is already set to PerMonitorV2 in Qt 6
+    # Set Qt to process events properly even during long operations
     if hasattr(QtCore, 'Qt'):
         QtGui.QGuiApplication.setHighDpiScaleFactorRoundingPolicy(
             QtCore.Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
@@ -1322,8 +1507,8 @@ def main():
     countdown = CountdownOverlay(config_manager, alarm_manager)
 
     # Set Tool flag to hide from taskbar
-    clock.setWindowFlags(clock.windowFlags() | QtCore.Qt.Tool)
-    countdown.setWindowFlags(countdown.windowFlags() | QtCore.Qt.Tool)
+    clock.setWindowFlags(clock.windowFlags() | QtCore.Qt.WindowType.Tool)
+    countdown.setWindowFlags(countdown.windowFlags() | QtCore.Qt.WindowType.Tool)
 
     # Now set the countdown in the alarm_manager
     alarm_manager.set_countdown(countdown)
@@ -1338,6 +1523,7 @@ def main():
     clock.show()
 
     sys.exit(app.exec())
+
 
 if __name__ == "__main__":
     main()

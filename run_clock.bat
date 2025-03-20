@@ -30,7 +30,7 @@ if %ERRORLEVEL% neq 0 (
 )
 
 echo Running Clock Overlay Application...
-python main.py %*
+start /B pythonw main.py %*
 
 REM Deactivate virtual environment
 call .venv\Scripts\deactivate.bat
