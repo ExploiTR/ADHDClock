@@ -29,15 +29,13 @@
     },
     "alarm": {
         "enabled": true,
-        "duration": 1.0,
-        "interval": 300
+        "duration": 0.4,
+        "interval": 120
     },
     "sound": {
         "type": [
-            "sine",
             "square",
-            "sawtooth",
-            "triangle"
+            "sawtooth"
         ],
         "frequency_min": 800,
         "frequency_max": 1200

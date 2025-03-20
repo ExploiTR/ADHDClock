@@ -178,7 +178,7 @@ class AlarmManager:
 
         # Play sound in a separate thread
         sound_thread = threading.Thread(target=self.sound_generator.play_sound)
-        sound_thread.daemon = True
+        sound_thread.daemon = False
         sound_thread.start()
 
         # Update interval in case it was changed in settings
