@@ -29,8 +29,8 @@
     },
     "alarm": {
         "enabled": true,
-        "duration": 0.5,
-        "interval": 120
+        "duration": 1.0,
+        "interval": 150
     },
     "sound": {
         "type": [
